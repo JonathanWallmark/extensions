@@ -2,12 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Metrics;
-using System.Linq;
 using System.Text;
 using Microsoft.Extensions.Telemetry.Testing.Metering.Internal;
 
@@ -18,8 +18,8 @@ namespace Microsoft.Extensions.Telemetry.Testing.Metering;
 /// </summary>
 /// <typeparam name="T">The type of metric measurement value.</typeparam>
 [Experimental]
-[DebuggerDisplay("Count = {Count}, LatestWrittenValue = {LatestWrittenValue}")]
-public sealed class MetricValuesHolder<T>
+[DebuggerDisplay("Count = {Count}")]
+public sealed class MetricValuesHolder<T> : IReadOnlyCollection<MetricValue<T>>
     where T : struct
 {
     private static readonly HashSet<Type> _supportedValueTypesAsDimensionValue = new()
@@ -35,21 +35,20 @@ public sealed class MetricValuesHolder<T>
 
     private readonly TimeProvider _timeProvider;
     private readonly AggregationType _aggregationType;
-    private readonly ConcurrentDictionary<string, MetricValue<T>> _valuesTable;
+    private readonly ConcurrentDictionary<string, MetricValue<T>> _valuesTable = new();
 #if NETCOREAPP3_1_OR_GREATER
-    private readonly ConcurrentBag<MetricValue<T>> _values;
+    private readonly ConcurrentBag<MetricValue<T>> _values = new();
+    private readonly ConcurrentQueue<Measurement<T>> _measurements = new();
 #else
-    private ConcurrentBag<MetricValue<T>> _values;
+    private ConcurrentBag<MetricValue<T>> _values = new();
+    private ConcurrentQueue<Measurement<T>> _measurements = new();
 #endif
-    private string? _latestWrittenKey;
 
     internal MetricValuesHolder(TimeProvider timeProvider, AggregationType aggregationType, Instrument instrument)
     {
         _timeProvider = timeProvider;
         _aggregationType = aggregationType;
         Instrument = instrument;
-        _values = new();
-        _valuesTable = new();
     }
 
     /// <summary>
@@ -58,41 +57,46 @@ public sealed class MetricValuesHolder<T>
     public Instrument Instrument { get; }
 
     /// <summary>
-    /// Gets all metric values recorded by the metric's instruments.
-    /// </summary>
-    public IReadOnlyCollection<MetricValue<T>> AllValues => _values;
-
-    /// <summary>
     /// Gets the total number of values held by this instance.
     /// </summary>
     public int Count => _values.Count;
-
-    /// <summary>
-    /// Gets the latest recorded metric measurement value.
-    /// </summary>
-    public T? LatestWrittenValue => LatestWritten?.Value;
-
-    /// <summary>
-    /// Gets the <see cref="MetricValue{T}"/> object containing whole information about the latest recorded metric measurement.
-    /// </summary>
-    public MetricValue<T>? LatestWritten => _latestWrittenKey == null ? null : _valuesTable[_latestWrittenKey];
 
     /// <summary>
     /// Gets a recorded metric measurement value by given dimensions.
     /// </summary>
     /// <param name="tags">The dimensions of a metric measurement.</param>
     /// <returns>The metric measurement value or <see langword="null"/> if it does not exist.</returns>
-    public T? GetValue(params KeyValuePair<string, object?>[] tags)
+    public T? GetValue(params KeyValuePair<string, object?>[]? tags) => GetMetricValue(tags.AsSpan())?.Value;
+
+    /// <summary>
+    /// Gets a recorded metric measurement value by given dimensions.
+    /// </summary>
+    /// <param name="tags">The dimensions of a metric measurement.</param>
+    /// <returns>The metric measurement value or <see langword="null"/> if it does not exist.</returns>
+    public T? GetValue(ReadOnlySpan<KeyValuePair<string, object?>> tags) => GetMetricValue(tags)?.Value;
+
+    /// <summary>oes
+    /// Gets a recorded metric measurement value by given dimensions.
+    /// </summary>
+    /// <param name="tags">The dimensions of a metric measurement.</param>
+    /// <returns>The metric measurement value or <see langword="null"/> if it does not exist.</returns>
+    public MetricValue<T>? GetMetricValue(params KeyValuePair<string, object?>[]? tags) => GetMetricValue(tags.AsSpan());
+
+    /// <summary>oes
+    /// Gets a recorded metric measurement value by given dimensions.
+    /// </summary>
+    /// <param name="tags">The dimensions of a metric measurement.</param>
+    /// <returns>The metric measurement value or <see langword="null"/> if it does not exist.</returns>
+    public MetricValue<T>? GetMetricValue(ReadOnlySpan<KeyValuePair<string, object?>> tags)
     {
-        var tagsCopy = tags.ToArray();
-        Array.Sort(tagsCopy, (x, y) => StringComparer.Ordinal.Compare(x.Key, y.Key));
-
-        var key = CreateKey(tagsCopy);
-
-        _ = _valuesTable.TryGetValue(key, out var value);
-
-        return value?.Value;
+        _ = _valuesTable.TryGetValue(CreateKey(tags, out _), out var value);
+        return value;
     }
+
+    /// <summary>
+    /// Gets the measurements tracked by this instance.
+    /// </summary>
+    public IReadOnlyList<Measurement<T>> Measurements => (IReadOnlyList<Measurement<T>>)_measurements;
 
     /// <summary>
     /// Clears all metric measurements information.
@@ -101,31 +105,46 @@ public sealed class MetricValuesHolder<T>
     {
 #if NETCOREAPP3_1_OR_GREATER
         _values.Clear();
+        _measurements.Clear();
 #else
         _values = new();
+        _measurements = new();
 #endif
         _valuesTable.Clear();
-        _latestWrittenKey = null;
     }
+
+    /// <summary>
+    /// Gets an enumerator of measurements in the holder.
+    /// </summary>
+    /// <returns>The enumerator.</returns>
+    IEnumerator<MetricValue<T>> IEnumerable<MetricValue<T>>.GetEnumerator() => _values.GetEnumerator();
+
+    /// <summary>
+    /// Gets an enumerator of measurements in the holder.
+    /// </summary>
+    /// <returns>The enumerator.</returns>
+    IEnumerator IEnumerable.GetEnumerator() => _values.GetEnumerator();
 
     internal void ReceiveValue(T value, ReadOnlySpan<KeyValuePair<string, object?>> tags)
     {
-        var tagsArray = tags.ToArray();
-        Array.Sort(tagsArray, (x, y) => StringComparer.Ordinal.Compare(x.Key, y.Key));
-        var key = CreateKey(tagsArray);
+        var key = CreateKey(tags, out var sortedTags);
+
+        _measurements.Enqueue(new Measurement<T>(value, sortedTags, _timeProvider.GetUtcNow()));
 
         switch (_aggregationType)
         {
             case AggregationType.Save:
-                Save(value, tagsArray, key);
+                var metricValue = new MetricValue<T>(value, sortedTags);
+                _values.Add(metricValue);
+                _ = _valuesTable.AddOrUpdate(key, metricValue, (_, _) => metricValue);
                 break;
 
             case AggregationType.Aggregate:
-                SaveAndAggregate(value, tagsArray, key);
+                GetOrAdd(key, sortedTags).Add(value);
                 break;
 
             case AggregationType.SaveOrUpdate:
-                SaveOrUpdate(value, tagsArray, key);
+                GetOrAdd(key, sortedTags).Update(value);
                 break;
 
             default:
@@ -133,12 +152,16 @@ public sealed class MetricValuesHolder<T>
         }
     }
 
-    private static string CreateKey(params KeyValuePair<string, object?>[] tags)
+    private static string CreateKey(ReadOnlySpan<KeyValuePair<string, object?>> tags, out KeyValuePair<string, object?>[] sortedTags)
     {
         if (tags.Length == 0)
         {
+            sortedTags = Array.Empty<KeyValuePair<string, object?>>();
             return string.Empty;
         }
+
+        sortedTags = tags.ToArray();
+        Array.Sort(sortedTags, (x, y) => StringComparer.Ordinal.Compare(x.Key, y.Key));
 
         const char TagSeparator = ';';
         const char KeyValueSeparator = ':';
@@ -146,7 +169,7 @@ public sealed class MetricValuesHolder<T>
 
         var keyBuilder = new StringBuilder();
 
-        foreach (var kvp in tags)
+        foreach (var kvp in sortedTags)
         {
             _ = keyBuilder
                 .Append(kvp.Key)
@@ -191,44 +214,14 @@ public sealed class MetricValuesHolder<T>
         return keyBuilder.ToString();
     }
 
-    private void Save(T value, KeyValuePair<string, object?>[] tagsArray, string key)
-    {
-        var metricValue = new MetricValue<T>(value, tagsArray, _timeProvider.GetUtcNow());
-
-        _latestWrittenKey = key;
-
-        SaveMetricValue(key, metricValue);
-    }
-
-    private void SaveAndAggregate(T value, KeyValuePair<string, object?>[] tagsArray, string key)
-    {
-        _latestWrittenKey = key;
-
-        GetOrAdd(key, tagsArray).Add(value);
-    }
-
-    private void SaveOrUpdate(T value, KeyValuePair<string, object?>[] tagsArray, string key)
-    {
-        _latestWrittenKey = key;
-
-        GetOrAdd(key, tagsArray).Update(value);
-    }
-
-    private MetricValue<T> GetOrAdd(string key, KeyValuePair<string, object?>[] tagsArray)
+    private MetricValue<T> GetOrAdd(string key, KeyValuePair<string, object?>[] sortedTags)
     {
         return _valuesTable.GetOrAdd(key,
             (_) =>
             {
-                var metricValue = new MetricValue<T>(default, tagsArray, _timeProvider.GetUtcNow());
+                var metricValue = new MetricValue<T>(default, sortedTags);
                 _values.Add(metricValue);
-
                 return metricValue;
             });
-    }
-
-    private void SaveMetricValue(string key, MetricValue<T> metricValue)
-    {
-        _values.Add(metricValue);
-        _ = _valuesTable.AddOrUpdate(key, metricValue, (_, _) => metricValue);
     }
 }

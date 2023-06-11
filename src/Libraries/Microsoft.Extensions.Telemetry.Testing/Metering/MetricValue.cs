@@ -18,10 +18,9 @@ public sealed class MetricValue<T>
 {
     private int _isLockTaken;
 
-    internal MetricValue(T measurement, KeyValuePair<string, object?>[] tags, DateTimeOffset timestamp)
+    internal MetricValue(T measurement, KeyValuePair<string, object?>[] tags)
     {
         Tags = tags;
-        Timestamp = timestamp;
         Value = measurement;
     }
 
@@ -29,11 +28,6 @@ public sealed class MetricValue<T>
     /// Gets a measurement's value.
     /// </summary>
     public T Value { get; internal set; }
-
-    /// <summary>
-    /// Gets a timestamp indicating when a measurement was recorded.
-    /// </summary>
-    public DateTimeOffset Timestamp { get; }
 
     /// <summary>
     /// Gets a collection of measurement's dimensions.
