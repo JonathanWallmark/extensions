@@ -194,10 +194,9 @@ if ($testCoverage) {
     Push-Location $PSScriptRoot/../
 
     $testResultPath = "./artifacts/TestResults/$configuration";
-    $testCommand = if ($PSVersionTable.PSEdition -eq 'Desktop' -or $PSVersionTable.Platform -ne 'Unix') { "build.cmd -test -c $configuration -bl:`$$binaryLog" } else { "build.sh -test -c $configuration -bl:`$$binaryLog" };
 
     # Run tests and collect code coverage
-    ./.dotnet/dotnet dotnet-coverage collect --settings ./eng/CodeCoverage.config --output $testResultPath/local.cobertura.xml "$testCommand"
+    ./.dotnet/dotnet dotnet-coverage collect --settings ./eng/CodeCoverage.config --output $testResultPath/local.cobertura.xml "build.cmd -test -configuration $configuration -bl:`$$binaryLog"
 
     # Generate the code coverage report and open it in the browser
     ./.dotnet/dotnet reportgenerator -reports:$testResultPath/*.cobertura.xml -targetdir:$testResultPath/CoverageResultsHtml -reporttypes:HtmlInline_AzurePipelines
